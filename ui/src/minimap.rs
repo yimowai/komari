@@ -4,9 +4,10 @@ use std::{
 };
 
 use backend::{
-    Action, ActionKey, ActionMove, DatabaseEvent, Map, Operation, OperationUpdate, Position,
-    RotationMode, create_map, database_event_receiver, delete_map, query_maps, redetect_minimap,
-    state_receiver, update_map, update_operation, upsert_map,
+    Action, ActionKey, ActionMove, Character, DatabaseEvent, Map, Operation, OperationUpdate,
+    Position, RotationMode, Settings, create_map, database_event_receiver, delete_map, query_maps,
+    redetect_minimap, state_receiver, update_map, update_operation, upsert_character, upsert_map,
+    upsert_settings,
 };
 use dioxus::{document::EvalError, html::FileData, prelude::*};
 use futures_util::StreamExt;
@@ -293,6 +294,9 @@ struct MinimapState {
     priority_action: Option<String>,
     erda_shower_state: String,
     input_state: String,
+    gpu_enabled: bool,
+    lie_detector_count: u64,
+    total_runtime: Duration,
     operation: Operation,
     detected_size: Option<(usize, usize)>,
 }
@@ -548,6 +552,9 @@ fn Canvas(
                 priority_action: current_state.priority_action,
                 erda_shower_state: current_state.erda_shower_state,
                 input_state: current_state.input_state,
+                gpu_enabled: current_state.gpu_enabled,
+                lie_detector_count: current_state.lie_detector_count,
+                total_runtime: current_state.total_runtime,
                 operation: current_state.operation,
                 detected_size: frame.as_ref().map(|(_, width, height)| (*width, *height)),
             };
@@ -555,7 +562,9 @@ fn Canvas(
             if *position.peek() != current_state.position.unwrap_or_default() {
                 position.set(current_state.position.unwrap_or_default());
             }
+            let operation = current_state.operation;
             state.set(Some(current_state));
+            log::info!("[ui] state updated: operation={:?}", operation);
             sleep(Duration::from_millis(50)).await;
 
             let bound = rotation_bound_and_type
@@ -602,9 +611,12 @@ fn Info(state: ReadSignal<Option<MinimapState>>, map: ReadSignal<Option<Map>>) -
         priority_action: String,
         erda_shower_state: String,
         input_state: String,
+        gpu_enabled: String,
+        lie_detector_count: String,
         detected_map_size: String,
         selected_map_size: String,
-        run_timer_duration: String,
+        time_until_stop: String,
+        run_time: String,
     }
 
     let info = use_memo(move || {
@@ -616,9 +628,12 @@ fn Info(state: ReadSignal<Option<MinimapState>>, map: ReadSignal<Option<Map>>) -
             priority_action: "None".to_string(),
             erda_shower_state: "Unknown".to_string(),
             input_state: "Unknown".to_string(),
+            gpu_enabled: "Unknown".to_string(),
+            lie_detector_count: "0".to_string(),
             detected_map_size: "Unknown".to_string(),
             selected_map_size: "Unknown".to_string(),
-            run_timer_duration: "None".to_string(),
+            time_until_stop: "None".to_string(),
+            run_time: "0s".to_string(),
         };
 
         if let Some(map) = map() {
@@ -629,13 +644,16 @@ fn Info(state: ReadSignal<Option<MinimapState>>, map: ReadSignal<Option<Map>>) -
             info.state = state.state;
             info.erda_shower_state = state.erda_shower_state;
             info.input_state = state.input_state;
-            info.run_timer_duration = match state.operation {
+            info.gpu_enabled = state.gpu_enabled.to_string();
+            info.lie_detector_count = state.lie_detector_count.to_string();
+            info.time_until_stop = match state.operation {
                 Operation::Halting | Operation::Running => "None".to_string(),
                 Operation::TemporaryHalting(duration) => duration_from(duration),
                 Operation::RunUntil(instant) => {
                     duration_from(instant.saturating_duration_since(Instant::now()))
                 }
             };
+            info.run_time = duration_from(state.total_runtime);
             if let Some((x, y)) = state.position {
                 info.position = format!("{x}, {y}");
             }
@@ -660,14 +678,16 @@ fn Info(state: ReadSignal<Option<MinimapState>>, map: ReadSignal<Option<Map>>) -
         div { class: "grid grid-cols-2 items-center justify-center px-4 py-3 gap-1",
             InfoItem { name: "State", value: info().state }
             InfoItem { name: "Position", value: info().position }
-            InfoItem { name: "HP", value: info().health }
             InfoItem { name: "Priority action", value: info().priority_action }
             InfoItem { name: "Normal action", value: info().normal_action }
             InfoItem { name: "Erda Shower", value: info().erda_shower_state }
             InfoItem { name: "Detected size", value: info().detected_map_size }
             InfoItem { name: "Selected size", value: info().selected_map_size }
-            InfoItem { name: "Run timer", value: info().run_timer_duration }
+            InfoItem { name: "Time Until Stop", value: info().time_until_stop }
+            InfoItem { name: "Run Time", value: info().run_time }
             InfoItem { name: "Input method", value: info().input_state }
+            InfoItem { name: "Use GPU", value: info().gpu_enabled }
+            InfoItem { name: "Lie Detectors", value: info().lie_detector_count }
         }
     }
 }
@@ -732,7 +752,7 @@ fn Buttons(state: ReadSignal<Option<MinimapState>>, map: ReadSignal<Option<Map>>
                 class: "w-20",
                 style: ButtonStyle::Primary,
                 disabled: disabled(),
-                on_click: move || async move {
+                on_click: move |_| async move {
                     let kind = match *kind.peek() {
                         OperationUpdate::Halt => OperationUpdate::Run,
                         OperationUpdate::TemporaryHalt | OperationUpdate::Run => {
@@ -747,7 +767,7 @@ fn Buttons(state: ReadSignal<Option<MinimapState>>, map: ReadSignal<Option<Map>>
                 class: "w-20",
                 style: ButtonStyle::Primary,
                 disabled: suspend_resume_disabled(),
-                on_click: move || async move {
+                on_click: move |_| async move {
                     let kind = match *kind.peek() {
                         OperationUpdate::Run => OperationUpdate::TemporaryHalt,
                         OperationUpdate::TemporaryHalt | OperationUpdate::Halt => {
@@ -773,6 +793,7 @@ fn Buttons(state: ReadSignal<Option<MinimapState>>, map: ReadSignal<Option<Map>>
 #[component]
 fn ImportExport(map: ReadSignal<Option<Map>>) -> Element {
     let coroutine = use_coroutine_handle::<MinimapUpdate>();
+    let mut bulk_key = use_signal(|| 0);
 
     let export_name = use_memo(move || {
         let name = map().map(|map| map.name).unwrap_or_default();
@@ -796,6 +817,49 @@ fn ImportExport(map: ReadSignal<Option<Map>>) -> Element {
         coroutine.send(MinimapUpdate::Import(map));
     });
 
+    let handle_bulk_import = move |files: Vec<FileData>| {
+        for file in files {
+            if !file.name().ends_with(".json") {
+                continue;
+            }
+            spawn(async move {
+                let file_name = file.name();
+                let Ok(bytes) = file.read_bytes().await else {
+                    log::error!("[bulk_import] failed to read: {}", file_name);
+                    return;
+                };
+
+                // Auto-detect type: try Map first (has required width/height fields),
+                // then Settings (has required capture_mode), then Character (fallback).
+                if let Ok(map) = serde_json::from_slice::<'_, Map>(&bytes) {
+                    log::info!("[bulk_import] detected Map '{}' from '{}'", map.name, file_name);
+                    coroutine.send(MinimapUpdate::Import(map));
+                } else if let Ok(mut settings) = serde_json::from_slice::<'_, Settings>(&bytes) {
+                    log::info!("[bulk_import] detected Settings from '{}'", file_name);
+                    // Preserve the existing settings id so we update rather than duplicate
+                    settings.id = None;
+                    let upserted = upsert_settings(settings).await;
+                    log::info!("[bulk_import] upserted Settings (id={:?})", upserted.id);
+                } else if let Ok(character) = serde_json::from_slice::<'_, Character>(&bytes) {
+                    log::info!(
+                        "[bulk_import] detected Character '{}' from '{}'",
+                        character.name,
+                        file_name
+                    );
+                    if let Some(upserted) = upsert_character(character).await {
+                        log::info!(
+                            "[bulk_import] upserted Character '{}' (id={:?})",
+                            upserted.name,
+                            upserted.id
+                        );
+                    }
+                } else {
+                    log::error!("[bulk_import] unrecognized JSON format: {}", file_name);
+                }
+            });
+        }
+    };
+
     rsx! {
         div { class: "flex gap-3",
             FileInput {
@@ -815,6 +879,25 @@ fn ImportExport(map: ReadSignal<Option<Map>>) -> Element {
 
                     "Export"
                 }
+            }
+            label {
+                class: "inline-block h-6 text-xs text-center font-medium content-center
+                        px-2 bg-primary-surface text-primary-text cursor-pointer",
+                input {
+                    key: "{bulk_key}",
+                    class: "sr-only",
+                    r#type: "file",
+                    accept: ".json,application/json",
+                    "webkitdirectory": "",
+                    multiple: true,
+                    onchange: move |e: Event<FormData>| {
+                        let files = e.data.files();
+                        log::info!("[bulk_import] folder selected, {} file(s)", files.len());
+                        handle_bulk_import(files);
+                        bulk_key += 1;
+                    },
+                }
+                "Bulk import"
             }
         }
     }

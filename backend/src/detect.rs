@@ -2299,14 +2299,32 @@ fn detect_lie_detector_shape(bgr: &impl ToInputArray, localization: &Localizatio
         .as_ref()
         .and_then(|base64| to_mat_from_base64(base64, false).ok());
 
-    detect_template(
+    let default_template = &*LIE_DETECTOR_TRANSPARENT_SHAPE_TEMPLATE;
+    let used_template = template.as_ref().unwrap_or(default_template);
+    let (rect, score) = match detect_template_single(
         bgr,
-        template
-            .as_ref()
-            .unwrap_or(&*LIE_DETECTOR_TRANSPARENT_SHAPE_TEMPLATE),
+        used_template,
+        no_array(),
         Point::default(),
-        0.6,
-    )
+        0.5,
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            debug!(
+                target: "backend/detect",
+                "lie_detector_shape title: NOT FOUND ({err:?})"
+            );
+            return Err(err);
+        }
+    };
+
+    debug!(
+        target: "backend/detect",
+        "lie_detector_shape title: MATCHED score={score:.4} at ({}, {}) {}x{}",
+        rect.x, rect.y, rect.width, rect.height,
+    );
+
+    Ok(rect)
 }
 
 fn detect_lie_detector_shape_preparing(bgr: &impl ToInputArray) -> Result<Rect> {
@@ -2318,7 +2336,30 @@ fn detect_lie_detector_shape_preparing(bgr: &impl ToInputArray) -> Result<Rect> 
         .unwrap()
     });
 
-    detect_template(bgr, &*TEMPLATE, Point::default(), 0.6)
+    let (rect, score) = match detect_template_single(
+        bgr,
+        &*TEMPLATE,
+        no_array(),
+        Point::default(),
+        0.5,
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            debug!(
+                target: "backend/detect",
+                "lie_detector_shape preparing: NOT FOUND ({err:?})"
+            );
+            return Err(err);
+        }
+    };
+
+    debug!(
+        target: "backend/detect",
+        "lie_detector_shape preparing: MATCHED score={score:.4} at ({}, {}) {}x{}",
+        rect.x, rect.y, rect.width, rect.height,
+    );
+
+    Ok(rect)
 }
 
 pub static LIE_DETECTOR_VIOLETTA_TEMPLATE: LazyLock<Mat> = LazyLock::new(|| {
@@ -3361,4 +3402,19 @@ fn build_session(model: &[u8]) -> Result<Session> {
     Ok(Session::builder()?
         .with_execution_providers([CUDAExecutionProvider::default().build()])?
         .commit_from_memory(model)?)
+}
+
+/// Whether a CUDA GPU is available for ONNX inference. Computed once at
+/// first call and cached.
+pub fn is_gpu_available() -> bool {
+    use std::sync::LazyLock;
+
+    static GPU_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
+        Session::builder()
+            .and_then(|b| {
+                b.with_execution_providers([CUDAExecutionProvider::default().build()])
+            })
+            .is_ok()
+    });
+    *GPU_AVAILABLE
 }

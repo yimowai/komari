@@ -1,5 +1,8 @@
 use std::{fmt::Debug, ops::DerefMut};
 
+#[cfg(debug_assertions)]
+use std::path::PathBuf;
+
 use opencv::{
     core::{MatTraitConst, MatTraitConstManual, Rect, Vec4b, Vector},
     imgcodecs::{IMREAD_COLOR, IMREAD_GRAYSCALE, imdecode},
@@ -94,6 +97,9 @@ impl MediatorService for DefaultMediatorService {
             .collect();
 
         let input_state = resources.input.state();
+        let gpu_enabled = crate::detect::is_gpu_available();
+        let lie_detector_count = resources.lie_detector_count;
+        let total_runtime = resources.total_runtime;
         let erda_shower_state = world.skills[SkillKind::ErdaShower].state.to_string();
 
         let idle = match world.minimap.state {
@@ -111,6 +117,7 @@ impl MediatorService for DefaultMediatorService {
             OperationState::Running => Operation::Running,
             OperationState::RunUntil { instant, .. } => Operation::RunUntil(instant),
         };
+        log::info!("[broadcast_state] operation={:?}", operation);
 
         let auto_mob_quadrant =
             player_context
@@ -141,6 +148,9 @@ impl MediatorService for DefaultMediatorService {
                 priority_action,
                 erda_shower_state,
                 input_state,
+                gpu_enabled,
+                lie_detector_count,
+                total_runtime,
                 destinations,
                 operation,
                 frame,
@@ -244,6 +254,13 @@ fn handle_ui_request(
         Request::TestTransparentShape(difficulty) => {
             test_transparent_shape(context, difficulty);
             Response::TestTransparentShape
+        }
+        #[cfg(debug_assertions)]
+        Request::TestTransparentShapeFile(path) => {
+            log::info!("[mediator] TestTransparentShapeFile received: {:?}", path);
+            test_transparent_shape_file(context, path);
+            log::info!("[mediator] TestTransparentShapeFile handler done");
+            Response::TestTransparentShapeFile
         }
     };
     let _ = response.send(result);
@@ -369,6 +386,13 @@ fn test_transparent_shape(context: &mut EventContext<'_>, difficulty: Transparen
     context
         .debug_service
         .test_transparent_shape(context.resources.input.clone(), difficulty);
+}
+
+#[cfg(debug_assertions)]
+fn test_transparent_shape_file(context: &mut EventContext<'_>, path: PathBuf) {
+    context
+        .debug_service
+        .test_transparent_shape_file(context.resources.input.clone(), path);
 }
 
 #[inline]

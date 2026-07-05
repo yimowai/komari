@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::{
-    env, fs,
+    fs,
     path::PathBuf,
     sync::LazyLock,
     time::{SystemTime, UNIX_EPOCH},
@@ -9,8 +9,10 @@ use std::{
 use opencv::{core::ToInputArray, imgcodecs::imwrite_def};
 
 static DATASET_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    let dir = env::current_exe()
-        .unwrap()
+    // Store in the project root so it survives `dx build` wipes of the
+    // target directory. env!("CARGO_MANIFEST_DIR") = <project>/backend,
+    // parent = <project>.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join("dataset");

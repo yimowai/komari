@@ -131,6 +131,8 @@ enum Request {
     TestVioletta,
     #[cfg(debug_assertions)]
     TestTransparentShape(TransparentShapeDifficulty),
+    #[cfg(debug_assertions)]
+    TestTransparentShapeFile(std::path::PathBuf),
 }
 
 /// Represents response to UI [`Request`].
@@ -166,6 +168,8 @@ enum Response {
     TestVioletta,
     #[cfg(debug_assertions)]
     TestTransparentShape,
+    #[cfg(debug_assertions)]
+    TestTransparentShapeFile,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -219,6 +223,9 @@ pub struct State {
     pub priority_action: Option<String>,
     pub erda_shower_state: String,
     pub input_state: String,
+    pub gpu_enabled: bool,
+    pub lie_detector_count: u64,
+    pub total_runtime: Duration,
     pub destinations: Vec<(i32, i32)>,
     pub operation: Operation,
     pub frame: Option<(Vec<u8>, usize, usize)>,
@@ -427,6 +434,13 @@ pub async fn test_violetta() {
 #[cfg(debug_assertions)]
 pub async fn test_transparent_shape(difficulty: TransparentShapeDifficulty) {
     send_request!(TestTransparentShape(difficulty))
+}
+
+#[cfg(debug_assertions)]
+pub async fn test_transparent_shape_file(path: std::path::PathBuf) {
+    log::info!("[backend::lib] test_transparent_shape_file called with: {:?}", path);
+    send_request!(TestTransparentShapeFile(path));
+    log::info!("[backend::lib] test_transparent_shape_file request completed");
 }
 
 async fn recv_request() -> Option<PendingRequest> {
